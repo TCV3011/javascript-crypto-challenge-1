@@ -2,62 +2,76 @@ const nacl = require('libsodium-wrappers')
 const Encryptor = require('./Encryptor')
 const Decryptor = require('./Decryptor')
 
-module.exports = async (peer = null) => {
+let SecureSessionPeer = async (peer = null) => {
+  // wait until nacl (libsodium) is ready
   await nacl.ready
-  const keyPair = nacl.crypto_kx_keypair()
-  const sk = keyPair.privateKey
-  let encryptor, decryptor
-  getServerKeyPair = function (server, client) {
-    return nacl.crypto_kx_server_session_keys(
-      server.publicKey,
-      sk,
-      client.publicKey
-    )
-  }
-  getClientKeyPair = function (server, client) {
-    return nacl.crypto_kx_client_session_keys(
-      client.publicKey,
-      sk,
-      server.publicKey
-    )
-  }
-  class SecureSessionPeer {
-    constructor() {
-      this.publicKey = keyPair.publicKey
-      this.privateKey
-    }
-    encrypt(msg) {
-      const nonce = nacl.randombytes_buf(nacl.crypto_secretbox_NONCEBYTES)
-      const ciphertext = encryptor.encrypt(msg, nonce)
-      return { ciphertext, nonce }
-    }
-    decrypt(ciphertext, nonce) {
-      decryptor.decrypt(ciphertext, nonce)
-    }
-    send(peerMsg) {}
-    receive() {}
-    async pair(current, other) {
-      let key
-      if (peer) {
-        // if peer is given, this instance is server
-        key = getClientKeyPair(other, current)
-        encryptor = await Encryptor(key.sharedTx)
-        decryptor = await Decryptor(key.sharedRx)
-      } else {
-        // instance is client
-        key = getServerKeyPair(current, other)
-        encryptor = await Encryptor(key.sharedTx)
-        decryptor = await Decryptor(key.sharedRx)
-      }
-    }
-  }
 
-  let secureSessionPeerInstance = new SecureSessionPeer()
+  // declare variables
+  let currentPeer = {}
+  let otherPeer = {}
+  let encryptor, decryptor
+  global.message = {}
+  const { publicKey, privateKey } = nacl.crypto_kx_keypair()
+
+  // set publicKey of current peer
+  currentPeer.publicKey = publicKey
 
   if (peer) {
-    await secureSessionPeerInstance.pair(secureSessionPeerInstance, peer)
-    await peer.pair(peer, secureSessionPeerInstance)
+    // if peer is given, current peer is server
+    // and other peer is client
+    otherPeer = peer
+    // generate server session keys
+    sharedKeys = nacl.crypto_kx_server_session_keys(
+      publicKey,
+      privateKey,
+      otherPeer.publicKey
+    )
+    // initialize encryptor & decryptor
+    encryptor = await Encryptor(sharedKeys.sharedTx)
+    decryptor = await Decryptor(sharedKeys.sharedRx)
+
+    // generate client session keys
+    await otherPeer.createClientKeys(publicKey)
   }
 
-  return Object.freeze(secureSessionPeerInstance)
+  // encrypt function
+  currentPeer.encrypt = (msg) => {
+    const nonce = nacl.randombytes_buf(nacl.crypto_secretbox_NONCEBYTES)
+    const ciphertext = encryptor.encrypt(msg, nonce)
+    return { ciphertext, nonce }
+  }
+
+  // decrypt function
+  currentPeer.decrypt = (ciphertext, nonce) => {
+    return decryptor.decrypt(ciphertext, nonce)
+  }
+
+  // send function
+  currentPeer.send = (msg) => {
+    global.message = currentPeer.encrypt(msg)
+  }
+
+  // receive function
+  currentPeer.receive = () => {
+    return currentPeer.decrypt(global.message.ciphertext, global.message.nonce)
+  }
+
+  // function to create client session keys
+  currentPeer.createClientKeys = async (serverPublicKey) => {
+    // generate client session keys
+    sharedKeys = nacl.crypto_kx_client_session_keys(
+      publicKey,
+      privateKey,
+      serverPublicKey
+    )
+    // initialize encryptor & decryptor
+    encryptor = await Encryptor(sharedKeys.sharedTx)
+    decryptor = await Decryptor(sharedKeys.sharedRx)
+  }
+
+  // prevents the modification of existing property attributes and values,
+  // and prevents the addition of new properties.
+  return Object.freeze(currentPeer)
 }
+// export the secureSessionPeer object
+module.exports = SecureSessionPeer
